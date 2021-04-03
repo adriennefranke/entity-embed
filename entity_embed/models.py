@@ -247,40 +247,38 @@ class TransformerSummarizerNet(nn.Module):
         self.mh_attention = nn.MultiheadAttention(
             embed_dim=self.embedding_size, num_heads=5, dropout=attention_dropout_p
         )
-        self.dense_net = nn.Linear(self.hidden_size * 2, self.embedding_size)
 
     def forward(self, field_embedding_dict, sequence_length_dict):
-        x = orig_x = torch.stack(
+        x = torch.stack(
             tuple(field_embedding_dict.values()),
-            # mh_attention requires batch in the dim 1,
-            # sequence in dim 0
-            dim=0,
+            dim=1,
         )
-        x = F.normalize(x, dim=0)
-        attn_mask = torch.stack(
+
+        # prepare attn_mask
+        field_mask = torch.stack(
             [torch.tensor(ls) for ls in sequence_length_dict.values()],
             dim=1,
         )
-        attn_mask = (attn_mask > 0).byte()
-        attn_mask = attn_mask.unsqueeze(dim=2) @ attn_mask.unsqueeze(dim=1)
+        field_mask = (field_mask > 0).byte()
+        attn_mask = field_mask.unsqueeze(dim=2) @ field_mask.unsqueeze(dim=1)
         attn_mask = attn_mask + torch.diag(torch.ones(attn_mask.size(-1))).byte()
         attn_mask = ~attn_mask.bool()
         attn_mask = attn_mask.repeat_interleave(self.mh_attention.num_heads, dim=0)
-
         if x.data.is_cuda:
             attn_mask = attn_mask.cuda()
+
+        # zero empty strings and sequences
+        if x.data.is_cuda:
+            field_mask = field_mask.cuda()
+        x = x * field_mask.unsqueeze(dim=-1)
+        x = F.normalize(x, dim=-1)
+
+        # attention
+        x = x.transpose(1, 0)
         x, __ = self.mh_attention(x, x, x, attn_mask=attn_mask, need_weights=False)
 
-        x = x.transpose(1, 0)
-        orig_x = orig_x.transpose(1, 0)
-        x = torch.cat(
-            [
-                x.reshape(x.size(0), x.size(1) * x.size(2)),
-                orig_x.reshape(orig_x.size(0), orig_x.size(1) * orig_x.size(2)),
-            ],
-            dim=1,
-        )
-        x = self.dense_net(x)
+        # final embedding
+        x = x.mean(dim=0)
 
         return F.normalize(x)
 
