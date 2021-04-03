@@ -235,17 +235,22 @@ class FieldsEmbedNet(nn.Module):
 
 class TransformerSummarizerNet(nn.Module):
     def __init__(
-        self,
-        field_config_dict,
-        embedding_size,
-        attention_dropout_p=0.1,
+        self, field_config_dict, embedding_size, transformer_dropout_p=0.1, n_transformer_layers=3
     ):
         super().__init__()
         self.field_config_dict = field_config_dict
         self.embedding_size = embedding_size
         self.hidden_size = self.embedding_size * len(self.field_config_dict)
-        self.mh_attention = nn.MultiheadAttention(
-            embed_dim=self.embedding_size, num_heads=5, dropout=attention_dropout_p
+        self.num_heads = 5
+        transformer_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.embedding_size,
+            nhead=self.num_heads,
+            dim_feedforward=self.hidden_size,
+            dropout=transformer_dropout_p,
+            activation="gelu",
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_encoder_layer, num_layers=n_transformer_layers
         )
 
     def forward(self, field_embedding_dict, sequence_length_dict):
@@ -263,19 +268,18 @@ class TransformerSummarizerNet(nn.Module):
         attn_mask = field_mask.unsqueeze(dim=2) @ field_mask.unsqueeze(dim=1)
         attn_mask = attn_mask + torch.diag(torch.ones(attn_mask.size(-1))).byte()
         attn_mask = ~attn_mask.bool()
-        attn_mask = attn_mask.repeat_interleave(self.mh_attention.num_heads, dim=0)
+        attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
         if x.data.is_cuda:
             attn_mask = attn_mask.cuda()
+            field_mask = field_mask.cuda()
 
         # zero empty strings and sequences
-        if x.data.is_cuda:
-            field_mask = field_mask.cuda()
         x = x * field_mask.unsqueeze(dim=-1)
-        x = F.normalize(x, dim=-1)
 
-        # attention
+        # transformer
+        x = F.normalize(x, dim=-1)
         x = x.transpose(1, 0)
-        x, __ = self.mh_attention(x, x, x, attn_mask=attn_mask, need_weights=False)
+        x = self.transformer_encoder(x, mask=attn_mask)
 
         # final embedding
         x = x.mean(dim=0)
