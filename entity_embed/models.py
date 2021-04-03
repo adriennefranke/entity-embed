@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 
 from .data_utils.numericalizer import FieldType
 
@@ -92,7 +91,7 @@ class MaskedAttention(nn.Module):
         # See e.g. https://discuss.pytorch.org/t/self-attention-on-words-and-masking/5671/5
         max_len = h.size(1)
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
-        mask = Variable((idxes < torch.LongTensor(sequence_lengths).unsqueeze(1)).float())
+        mask = (idxes < torch.LongTensor(sequence_lengths).unsqueeze(1)).float()
         if scores.data.is_cuda:
             mask = mask.cuda()
 
@@ -160,7 +159,7 @@ class MultitokenAvgEmbed(nn.Module):
         # Compute a mask for the attention on the padded sequences
         # See e.g. https://discuss.pytorch.org/t/self-attention-on-words-and-masking/5671/5
         idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
-        mask = Variable((idxes < torch.LongTensor(sequence_lengths).unsqueeze(1)).float())
+        mask = (idxes < torch.LongTensor(sequence_lengths).unsqueeze(1)).float()
         if x.data.is_cuda:
             mask = mask.cuda()
 
@@ -175,26 +174,6 @@ class MultitokenAvgEmbed(nn.Module):
         representations = weighted.sum(dim=1)
 
         return representations
-
-
-class EntityAvgPoolNet(nn.Module):
-    def __init__(self, field_config_dict):
-        super().__init__()
-        if len(field_config_dict) > 1:
-            self.weights = nn.Parameter(
-                torch.full((len(field_config_dict),), 1 / len(field_config_dict))
-            )
-        else:
-            self.weights = None
-
-    def forward(self, field_embedding_dict):
-        if self.weights is not None:
-            field_embedding_list = list(field_embedding_dict.values())
-            x = torch.stack(field_embedding_list, dim=1)
-            x = F.normalize(x, dim=2)
-            return F.normalize((x * self.weights.unsqueeze(-1).expand_as(x)).sum(axis=1), dim=1)
-        else:
-            return F.normalize(list(field_embedding_dict.values())[0], dim=1)
 
 
 class FieldsEmbedNet(nn.Module):
@@ -254,6 +233,58 @@ class FieldsEmbedNet(nn.Module):
         return field_embedding_dict
 
 
+class TransformerSummarizerNet(nn.Module):
+    def __init__(
+        self,
+        field_config_dict,
+        embedding_size,
+        attention_dropout_p=0.1,
+    ):
+        super().__init__()
+        self.field_config_dict = field_config_dict
+        self.embedding_size = embedding_size
+        self.hidden_size = self.embedding_size * len(self.field_config_dict)
+        self.mh_attention = nn.MultiheadAttention(
+            embed_dim=self.embedding_size, num_heads=5, dropout=attention_dropout_p
+        )
+        self.dense_net = nn.Linear(self.hidden_size * 2, self.embedding_size)
+
+    def forward(self, field_embedding_dict, sequence_length_dict):
+        x = orig_x = torch.stack(
+            tuple(field_embedding_dict.values()),
+            # mh_attention requires batch in the dim 1,
+            # sequence in dim 0
+            dim=0,
+        )
+        x = F.normalize(x, dim=0)
+        attn_mask = torch.stack(
+            [torch.tensor(ls) for ls in sequence_length_dict.values()],
+            dim=1,
+        )
+        attn_mask = (attn_mask > 0).byte()
+        attn_mask = attn_mask.unsqueeze(dim=2) @ attn_mask.unsqueeze(dim=1)
+        attn_mask = attn_mask + torch.diag(torch.ones(attn_mask.size(-1))).byte()
+        attn_mask = ~attn_mask.bool()
+        attn_mask = attn_mask.repeat_interleave(self.mh_attention.num_heads, dim=0)
+
+        if x.data.is_cuda:
+            attn_mask = attn_mask.cuda()
+        x, __ = self.mh_attention(x, x, x, attn_mask=attn_mask, need_weights=False)
+
+        x = x.transpose(1, 0)
+        orig_x = orig_x.transpose(1, 0)
+        x = torch.cat(
+            [
+                x.reshape(x.size(0), x.size(1) * x.size(2)),
+                orig_x.reshape(orig_x.size(0), orig_x.size(1) * orig_x.size(2)),
+            ],
+            dim=1,
+        )
+        x = self.dense_net(x)
+
+        return F.normalize(x)
+
+
 class BlockerNet(nn.Module):
     def __init__(
         self,
@@ -266,47 +297,14 @@ class BlockerNet(nn.Module):
         self.field_embed_net = FieldsEmbedNet(
             field_config_dict=field_config_dict, embedding_size=embedding_size
         )
-        self.avg_pool_net = EntityAvgPoolNet(field_config_dict)
+        self.summarizer_net = TransformerSummarizerNet(
+            field_config_dict, embedding_size=embedding_size
+        )
 
     def forward(self, tensor_dict, sequence_length_dict):
         field_embedding_dict = self.field_embed_net(
             tensor_dict=tensor_dict, sequence_length_dict=sequence_length_dict
         )
-        return self.avg_pool_net(field_embedding_dict)
-
-    def fix_pool_weights(self):
-        """
-        Force pool weights between 0 and 1 and total sum as 1.
-        """
-        if self.avg_pool_net.weights is None:
-            return
-
-        with torch.no_grad():
-            sd = self.avg_pool_net.state_dict()
-            weights = sd["weights"]
-            one_tensor = torch.tensor([1.0]).to(weights.device)
-            if torch.any((weights < 0) | (weights > 1)) or not torch.isclose(
-                weights.sum(), one_tensor
-            ):
-                weights[weights < 0] = 0
-                weights_sum = weights.sum()
-                if weights_sum > 0:
-                    weights /= weights.sum()
-                else:
-                    print("Warning: all weights turned to 0. Setting all equal.")
-                    weights[[True] * len(weights)] = 1 / len(weights)
-                sd["weights"] = weights
-                self.avg_pool_net.load_state_dict(sd)
-
-    def get_pool_weights(self):
-        with torch.no_grad():
-            if self.avg_pool_net.weights is None:
-                return {list(self.field_config_dict.keys())[0]: 1.0}
-
-            return {
-                field: float(weight)
-                for field, weight in zip(
-                    self.field_config_dict.keys(),
-                    self.avg_pool_net.state_dict()["weights"],
-                )
-            }
+        return self.summarizer_net(
+            field_embedding_dict=field_embedding_dict, sequence_length_dict=sequence_length_dict
+        )

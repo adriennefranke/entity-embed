@@ -95,15 +95,6 @@ class _BaseEmbed(pl.LightningModule):
         self.log("train_loss", loss)
         return loss
 
-    def on_train_batch_end(self, outputs, batch, batch_idx, dataloader_idx):
-        self.blocker_net.fix_pool_weights()
-        self.log_dict(
-            {
-                f"pool_{field}": weight
-                for field, weight in self.blocker_net.get_pool_weights().items()
-            }
-        )
-
     def validation_step(self, batch, batch_idx):
         tensor_dict, sequence_length_dict = batch
         embedding_batch = self.blocker_net(tensor_dict, sequence_length_dict)
@@ -136,9 +127,6 @@ class _BaseEmbed(pl.LightningModule):
             self.parameters(), lr=self.learning_rate, **self.optimizer_kwargs
         )
         return optimizer
-
-    def get_pool_weights(self):
-        return self.blocker_net.get_pool_weights()
 
     def fit(
         self,
