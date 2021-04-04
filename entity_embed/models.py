@@ -247,7 +247,6 @@ class TransformerSummarizerNet(nn.Module):
             nhead=self.num_heads,
             dim_feedforward=self.hidden_size,
             dropout=transformer_dropout_p,
-            activation="gelu",
         )
         self.transformer_encoder = nn.TransformerEncoder(
             transformer_encoder_layer, num_layers=n_transformer_layers
@@ -259,27 +258,17 @@ class TransformerSummarizerNet(nn.Module):
             dim=1,
         )
 
-        # prepare attn_mask
+        # zero empty strings and sequences
         field_mask = torch.stack(
-            [torch.tensor(ls) for ls in sequence_length_dict.values()],
+            [torch.tensor(ls, device=x.device) for ls in sequence_length_dict.values()],
             dim=1,
         )
-        field_mask = (field_mask > 0).byte()
-        attn_mask = field_mask.unsqueeze(dim=2) @ field_mask.unsqueeze(dim=1)
-        attn_mask = attn_mask + torch.diag(torch.ones(attn_mask.size(-1))).byte()
-        attn_mask = ~attn_mask.bool()
-        attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
-        if x.data.is_cuda:
-            attn_mask = attn_mask.cuda()
-            field_mask = field_mask.cuda()
-
-        # zero empty strings and sequences
         x = x * field_mask.unsqueeze(dim=-1)
 
         # transformer
         x = F.normalize(x, dim=-1)
         x = x.transpose(1, 0)
-        x = self.transformer_encoder(x, mask=attn_mask)
+        x = self.transformer_encoder(x)
 
         # final embedding
         x = x.mean(dim=0)
