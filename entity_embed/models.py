@@ -235,7 +235,7 @@ class FieldsEmbedNet(nn.Module):
 
 class TransformerSummarizerNet(nn.Module):
     def __init__(
-        self, field_config_dict, embedding_size, transformer_dropout_p=0.1, n_transformer_layers=3
+        self, field_config_dict, embedding_size, transformer_dropout_p=0.1, n_transformer_layers=1
     ):
         super().__init__()
         self.field_config_dict = field_config_dict
