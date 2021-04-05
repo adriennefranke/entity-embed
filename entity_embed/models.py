@@ -233,7 +233,7 @@ class FieldsEmbedNet(nn.Module):
         return field_embedding_dict
 
 
-class TransformerPoolNet(nn.Module):
+class SummarizerNet(nn.Module):
     def __init__(
         self, field_config_dict, embedding_size, transformer_dropout_p=0.1, n_transformer_layers=1
     ):
@@ -242,6 +242,7 @@ class TransformerPoolNet(nn.Module):
         self.embedding_size = embedding_size
         self.hidden_size = self.embedding_size * len(self.field_config_dict)
         self.num_heads = 5
+
         transformer_encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.embedding_size,
             nhead=self.num_heads,
@@ -263,17 +264,27 @@ class TransformerPoolNet(nn.Module):
             dim=1,
         )
 
-        # zero empty strings and sequences
+        # prepare attn_mask using empty strings and sequences
         field_mask = torch.stack(
-            [torch.tensor(ls, device=x.device) for ls in sequence_length_dict.values()],
+            [torch.tensor(ls) for ls in sequence_length_dict.values()],
             dim=1,
         )
+        field_mask = (field_mask > 0).byte()
+        attn_mask = field_mask.unsqueeze(dim=2) @ field_mask.unsqueeze(dim=1)
+        attn_mask = attn_mask + torch.diag(torch.ones(attn_mask.size(-1))).byte()
+        attn_mask = ~attn_mask.bool()
+        attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
+        if x.data.is_cuda:
+            attn_mask = attn_mask.cuda()
+            field_mask = field_mask.cuda()
+
+        # zero empty strings and sequences
         x = x * field_mask.unsqueeze(dim=-1)
 
         # transformer
         x = F.normalize(x, dim=-1)
         x = x.transpose(1, 0)
-        x = self.transformer_encoder(x)
+        x = self.transformer_encoder(x, mask=attn_mask)
 
         # final embedding
         x = x.transpose(1, 0)
@@ -294,14 +305,12 @@ class BlockerNet(nn.Module):
         self.field_embed_net = FieldsEmbedNet(
             field_config_dict=field_config_dict, embedding_size=embedding_size
         )
-        self.pool_net = TransformerPoolNet(
-            field_config_dict=field_config_dict, embedding_size=embedding_size
-        )
+        self.summarizer_net = SummarizerNet(field_config_dict, embedding_size=embedding_size)
 
     def forward(self, tensor_dict, sequence_length_dict):
         field_embedding_dict = self.field_embed_net(
             tensor_dict=tensor_dict, sequence_length_dict=sequence_length_dict
         )
-        return self.pool_net(
+        return self.summarizer_net(
             field_embedding_dict=field_embedding_dict, sequence_length_dict=sequence_length_dict
         )
