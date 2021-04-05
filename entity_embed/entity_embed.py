@@ -27,7 +27,7 @@ class _BaseEmbed(pl.LightningModule):
         miner_cls=None,
         miner_kwargs=None,
         optimizer_cls=torch.optim.Adam,
-        learning_rate=0.0001,
+        learning_rate=0.00003,
         optimizer_kwargs=None,
         ann_k=10,
         sim_threshold_list=[0.3, 0.5, 0.7],

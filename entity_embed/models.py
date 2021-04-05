@@ -233,7 +233,7 @@ class FieldsEmbedNet(nn.Module):
         return field_embedding_dict
 
 
-class TransformerSummarizerNet(nn.Module):
+class TransformerPoolNet(nn.Module):
     def __init__(
         self, field_config_dict, embedding_size, transformer_dropout_p=0.1, n_transformer_layers=1
     ):
@@ -250,6 +250,11 @@ class TransformerSummarizerNet(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(
             transformer_encoder_layer, num_layers=n_transformer_layers
+        )
+        self.dense_net = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size, bias=False),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, self.embedding_size, bias=False),
         )
 
     def forward(self, field_embedding_dict, sequence_length_dict):
@@ -271,7 +276,8 @@ class TransformerSummarizerNet(nn.Module):
         x = self.transformer_encoder(x)
 
         # final embedding
-        x = x.mean(dim=0)
+        x = x.transpose(1, 0)
+        x = self.dense_net(x.reshape(x.size(0), x.size(1) * x.size(2)))
 
         return F.normalize(x)
 
@@ -288,14 +294,14 @@ class BlockerNet(nn.Module):
         self.field_embed_net = FieldsEmbedNet(
             field_config_dict=field_config_dict, embedding_size=embedding_size
         )
-        self.summarizer_net = TransformerSummarizerNet(
-            field_config_dict, embedding_size=embedding_size
+        self.pool_net = TransformerPoolNet(
+            field_config_dict=field_config_dict, embedding_size=embedding_size
         )
 
     def forward(self, tensor_dict, sequence_length_dict):
         field_embedding_dict = self.field_embed_net(
             tensor_dict=tensor_dict, sequence_length_dict=sequence_length_dict
         )
-        return self.summarizer_net(
+        return self.pool_net(
             field_embedding_dict=field_embedding_dict, sequence_length_dict=sequence_length_dict
         )
